@@ -1,0 +1,418 @@
+#Features:
+#  Max power protection (configurable?)
+#  Open/Close working times in seconds (cover_duration)
+#  Input buttons work without home assistant
+#    Single click: Tilt Up/Down
+#    Double click: Fully Open/Close
+#  Relays stop on their own when the load stops (Power below 1w)
+
+substitutions:
+  device: esphome11
+  name: Blind home office
+# This allows a certain time when switching directly from 1 relay to another
+# Can be useful to protect the motor of a blind
+  interlock_wait: 500ms
+# The cover will stop after this time, if the power stop doens't work
+  max_duration: 60s
+# This manage the estimated cover position
+  open_duration: 56s
+  close_duration: 56s
+# Single click detection
+  single_min_length: 100ms
+  single_max_length: 500ms
+# Double click detection
+  double_min_length: 50ms
+  double_max_length: 250ms
+# Sensor updates to the frontend
+  update_throttle: 30s
+
+esphome:
+  name: ${device}
+  comment: ${name}
+  platform: ESP8266
+  board: esp01_1m
+  on_shutdown:
+    then:
+      - globals.set:
+          id: position
+          value: id(my_cover).position
+  on_boot:
+#    priority: 300
+    then:
+      - lambda: id(my_cover).publish_state(id(position));
+      - binary_sensor.template.publish:
+          id: open_endstop_binary_sensor
+          state: OFF
+      - binary_sensor.template.publish:
+          id: close_endstop_binary_sensor
+          state: OFF
+      - binary_sensor.template.publish:
+          id: max_power_reached
+          state: OFF
+      # - lambda: |-
+      #     id(ota1).set_port(8266);
+wifi:
+  ssid: 'tIoT'
+  password: !secret wifi_psw
+  manual_ip:
+    static_ip: 192.168.107.91
+    gateway: 192.168.107.1
+    subnet: 255.255.255.0
+    dns1: 192.168.107.1
+#  use_address: 192.168.107.90
+
+#debug:
+
+# Enable logging
+logger:
+#   level: VERY_VERBOSE
+#   logs:
+#     i2c: VERY_VERBOSE
+
+# Enable Home Assistant API
+api:
+  password: !secret api_psw
+
+ota:
+  password: !secret ota_psw
+#  port: 8277
+
+globals:
+   - id: position
+     type: int
+     restore_value: yes
+   - id: powered
+     type: int
+     restore_value: no
+     initial_value: '0'
+     
+i2c:
+  sda: GPIO12
+  scl: GPIO14
+  scan: False
+
+# text_sensor:
+#   - platform: template
+#     name: ${name}
+#     lambda: !lambda |-
+#       if (id(input1).state) {
+#         return {"i1"};
+#       }
+#       if (id(input2).state) {
+#         return {"i2"};
+#       }
+
+sensor:
+# Max power config from HA
+  # - platform: homeassistant
+  #   name: "Max power"
+  #   id: max_power
+  #   entity_id: input_number.alarmminutes #to be replaced
+#OR:
+# Hardcoded Max power config
+  - platform: template
+    id: max_power
+    lambda: |-
+      return 95.0;
+
+  - platform: uptime
+    name: ${name} Uptime Sensor
+    unit_of_measurement: days
+    filters:
+      - lambda: return x / 60 / 60 / 24;
+  - platform: wifi_signal
+    name: ${name} WiFi Signal
+    filters:
+      - or:
+        - heartbeat: 1h
+        - delta: 3
+        
+  # NTC Temperature
+  - platform: ntc
+    sensor: temp_resistance_reading
+    name: ${name} Temperature
+    calibration:
+      b_constant: 3350
+      reference_resistance: 10kOhm
+      reference_temperature: 298.15K
+  - platform: resistance
+    id: temp_resistance_reading
+    sensor: temp_analog_reading
+    configuration: DOWNSTREAM
+    resistor: 32kOhm
+  - platform: adc
+    id: temp_analog_reading
+    pin: A0
+
+  # Voltage, Current, Power sensor
+  - platform: ade7953
+    address: 0x38
+    update_interval: 1s
+    voltage:
+      name: ${name} Voltage
+      id: voltage
+      filters:
+        - throttle: ${update_throttle}
+    current_a:
+      name: ${name} Current B
+      id: current_b
+      filters:
+        or:
+          - throttle: 30s
+          - delta: 0.03
+    current_b:
+      name: ${name} Current A
+      id: current_a
+      filters:
+        or:
+          - throttle: ${update_throttle}
+          - delta: 0.03
+    active_power_a:
+      name: ${name} Active Power B #close cover
+      id: active_power_b
+      filters:
+        - or:
+          - throttle: ${update_throttle}
+          - delta: 1
+#        - multiply: -1
+        # - calibrate_linear:
+        #     # Map 0.0 (from sensor) to 0.0 (true value)
+        #     - 0.0 -> 0.0
+        #     - 0.1 -> 0.0
+#            - 56.5 -> 60.0
+      on_value:
+        then:
+          - logger.log:
+              format: "Got power B %.1f"
+              args: [ 'id(active_power_b).state' ]
+              level: INFO
+          - if: #Stop if Max Power is reached
+              condition:
+                lambda: 'return id(active_power_b).state > id(max_power).state;'
+              then:
+                - logger.log:
+                    format: "Attention, Power B above %.1f"
+                    args: [ 'id(max_power).state' ]
+                    level: INFO
+                - cover.stop: my_cover
+                - binary_sensor.template.publish:
+                    id: max_power_reached
+                    state: ON
+                - delay: 1min
+                - binary_sensor.template.publish:
+                    id: max_power_reached
+                    state: OFF
+      on_value_range:
+        - above: 1
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(close_cover).state and id(my_cover).position > 0;'
+                then:
+                  - logger.log: "Close cover active and position above 0 and sensor B above 1"
+                  - globals.set:
+                      id: powered
+                      value: '1'
+        - below: 1
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(close_cover).state and id(powered) == 1;'
+                then:
+                  - logger.log: "Sensor B below 1. Stopping cover"
+                  - binary_sensor.template.publish:
+                      id: close_endstop_binary_sensor
+                      state: ON
+
+    active_power_b:
+      name: ${name} Active Power A #open cover
+      id: active_power_a
+      filters:
+        - or:
+          - throttle: ${update_throttle}
+          - delta: 1
+        - multiply: -1
+        # - calibrate_linear:
+        #     # Map 0.0 (from sensor) to 0.0 (true value)
+        #     - 0.0 -> 0.0
+        #     - 56.5 -> 60.0
+      on_value:
+        then:
+          - logger.log:
+              format: "Got power A %.1f"
+              args: [ 'id(active_power_a).state' ]
+              level: INFO
+          - if: #Stop if Max Power is reached
+              condition:
+                lambda: 'return id(active_power_a).state > id(max_power).state;'
+              then:
+                - logger.log:
+                    format: "Attention, Power A above %.1f"
+                    args: [ 'id(max_power).state' ]
+                    level: INFO
+                - cover.stop: my_cover
+                - binary_sensor.template.publish:
+                    id: max_power_reached
+                    state: ON
+                - delay: 1min
+                - binary_sensor.template.publish:
+                    id: max_power_reached
+                    state: OFF
+      on_value_range:
+        - above: 1
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(open_cover).state and id(my_cover).position < 1.0;'
+                then:
+                  - logger.log: "Open cover active, position below 1 and sensor A above 1"
+                  - globals.set:
+                      id: powered
+                      value: '1'
+        - below: 1
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(open_cover).state and id(powered) == 1;'
+                then:
+                  - logger.log: "Sensor A below 1. Stopping cover"
+                  - binary_sensor.template.publish:
+                      id: open_endstop_binary_sensor
+                      state: ON
+
+binary_sensor:
+#Binary sensors for the Shelly inputs
+  - platform: gpio
+    pin:
+      number: GPIO13
+    name: ${name} Input1
+    id: input1
+    filters:
+      - delayed_on: 10ms
+    on_click:
+      min_length: ${single_min_length}
+      max_length: ${single_max_length}
+      then:
+        - logger.log: "Single click"
+        - lambda: |-
+            auto call = id(my_cover).make_call();
+            call.set_position(id(my_cover).position+0.01);
+            call.perform();
+    on_double_click:
+      min_length: ${double_min_length}
+      max_length: ${double_max_length}
+      then:
+        - logger.log: "Double click"
+        - cover.open: my_cover
+        
+  - platform: gpio
+    pin:
+      number: GPIO5
+    name: ${name} Input2
+    id: input2
+    filters:
+      - delayed_on: 10ms
+    on_click:
+      min_length: ${single_min_length}
+      max_length: ${single_max_length}
+      then:
+        - logger.log: "Single click"
+        - lambda: |-
+            auto call = id(my_cover).make_call();
+            call.set_position(id(my_cover).position-0.01);
+            call.perform();
+    on_double_click:
+      min_length: ${double_min_length}
+      max_length: ${double_max_length}
+      then:
+        - logger.log: "Double click"
+        - cover.close: my_cover
+        
+#End-stop cover binary sensors
+  - platform: template
+    id: open_endstop_binary_sensor
+    name: ${name} Open endstop
+  - platform: template
+    id: close_endstop_binary_sensor
+    name: ${name} Close endstop
+#Max power reached
+  - platform: template
+    name: ${name} Max power
+    id: max_power_reached
+#    lambda: return false;
+#Relay status binary sensors for HA
+  - platform: template
+    name: ${name} Relay1
+    id: relay1
+    lambda: return id(open_cover).state;
+  - platform: template
+    name: ${name} Relay2
+    id: relay2
+    lambda: return id(close_cover).state;
+    
+# status_led:
+#   pin:
+#     number: GPIO0
+#     inverted: yes
+  
+switch:
+  - platform: restart
+    name: ${name} Restart
+
+  - platform: gpio
+    pin: GPIO4
+    interlock: &interlock [open_cover, close_cover]
+    id: open_cover
+    restore_mode: always off
+    interlock_wait_time: ${interlock_wait}
+    
+  - platform: gpio
+    pin: GPIO15
+    interlock: *interlock
+    id: close_cover
+    restore_mode: always off
+    interlock_wait_time: ${interlock_wait}
+    
+cover:
+  - platform: endstop
+    name: ${name}
+    id: my_cover
+    device_class: blind
+    max_duration: ${max_duration}
+    open_action:
+      - globals.set:
+          id: powered
+          value: '0'
+      - binary_sensor.template.publish:
+          id: open_endstop_binary_sensor
+          state: OFF
+      - binary_sensor.template.publish:
+          id: close_endstop_binary_sensor
+          state: OFF
+      - switch.turn_on: open_cover
+    open_duration: ${open_duration}
+    open_endstop: open_endstop_binary_sensor
+    close_action:
+      - globals.set:
+          id: powered
+          value: '0'
+      - binary_sensor.template.publish:
+          id: close_endstop_binary_sensor
+          state: OFF
+      - binary_sensor.template.publish:
+          id: open_endstop_binary_sensor
+          state: OFF
+      - switch.turn_on: close_cover
+    close_duration: ${close_duration}
+    close_endstop: close_endstop_binary_sensor
+    stop_action:
+      - if:
+          condition:
+            lambda: 'return id(open_cover).state;'
+          then:
+            - switch.turn_off: open_cover
+      - if:
+          condition:
+            lambda: 'return id(close_cover).state;'
+          then:
+            - switch.turn_off: close_cover
