@@ -2,13 +2,14 @@
 #  Max power protection (configurable?)
 #  Open/Close working times in seconds (cover_duration)
 #  Input buttons work without home assistant
-#    Single click: Tilt Up/Down
-#    Double click: Fully Open/Close
+#    Normal Up/Down buttons
+#    Single click: Tilt Up/Down (OPTIONAL)
+#    Double click: Fully Open/Close (OPTIONAL)
 #  Relays stop on their own when the load stops (Power below 1w)
 
 substitutions:
   device: esphome11
-  name: Blind home office
+  name: Blind XXXXXX
 # This allows a certain time when switching directly from 1 relay to another
 # Can be useful to protect the motor of a blind
   interlock_wait: 500ms
@@ -30,7 +31,9 @@ esphome:
   name: ${device}
   comment: ${name}
   platform: ESP8266
-  board: esp01_1m
+#  board: esp01_1m
+  board: modwifi
+  arduino_version: 2.4.2
   on_shutdown:
     then:
       - globals.set:
@@ -52,14 +55,15 @@ esphome:
       # - lambda: |-
       #     id(ota1).set_port(8266);
 wifi:
-  ssid: 'tIoT'
+  ssid: 'IoT'
   password: !secret wifi_psw
+  power_save_mode: none
   manual_ip:
-    static_ip: 192.168.107.91
-    gateway: 192.168.107.1
+    static_ip: 192.168.1.91
+    gateway: 192.168.1.1
     subnet: 255.255.255.0
-    dns1: 192.168.107.1
-#  use_address: 192.168.107.90
+    dns1: 192.168.1.1
+#  use_address: 192.168.1.90
 
 #debug:
 
@@ -281,6 +285,10 @@ sensor:
                       state: ON
 
 binary_sensor:
+  - platform: gpio
+    pin: GPIO16
+    name: "ade7953 IRQ pin"
+    internal: true
 #Binary sensors for the Shelly inputs
   - platform: gpio
     pin:
@@ -289,21 +297,29 @@ binary_sensor:
     id: input1
     filters:
       - delayed_on: 10ms
-    on_click:
-      min_length: ${single_min_length}
-      max_length: ${single_max_length}
+    on_press:
       then:
-        - logger.log: "Single click"
-        - lambda: |-
-            auto call = id(my_cover).make_call();
-            call.set_position(id(my_cover).position+0.01);
-            call.perform();
-    on_double_click:
-      min_length: ${double_min_length}
-      max_length: ${double_max_length}
-      then:
-        - logger.log: "Double click"
+        - logger.log: "On_Press Open Cover"
         - cover.open: my_cover
+    on_release:
+      then:
+        - logger.log: "On_Press Stop Cover"
+        - cover.stop: my_cover
+    # on_click:
+    #   min_length: ${single_min_length}
+    #   max_length: ${single_max_length}
+    #   then:
+    #     - logger.log: "Single click"
+    #     - lambda: |-
+    #         auto call = id(my_cover).make_call();
+    #         call.set_position(id(my_cover).position+0.01);
+    #         call.perform();
+    # on_double_click:
+    #   min_length: ${double_min_length}
+    #   max_length: ${double_max_length}
+    #   then:
+    #     - logger.log: "Double click"
+    #     - cover.open: my_cover
         
   - platform: gpio
     pin:
@@ -312,21 +328,29 @@ binary_sensor:
     id: input2
     filters:
       - delayed_on: 10ms
-    on_click:
-      min_length: ${single_min_length}
-      max_length: ${single_max_length}
+    on_press:
       then:
-        - logger.log: "Single click"
-        - lambda: |-
-            auto call = id(my_cover).make_call();
-            call.set_position(id(my_cover).position-0.01);
-            call.perform();
-    on_double_click:
-      min_length: ${double_min_length}
-      max_length: ${double_max_length}
-      then:
-        - logger.log: "Double click"
+        - logger.log: "On_Press Close Cover"
         - cover.close: my_cover
+    on_release:
+      then:
+        - logger.log: "On_Press Stop Cover"
+        - cover.stop: my_cover
+    # on_click:
+    #   min_length: ${single_min_length}
+    #   max_length: ${single_max_length}
+    #   then:
+    #     - logger.log: "Single click"
+    #     - lambda: |-
+    #         auto call = id(my_cover).make_call();
+    #         call.set_position(id(my_cover).position-0.01);
+    #         call.perform();
+    # on_double_click:
+    #   min_length: ${double_min_length}
+    #   max_length: ${double_max_length}
+    #   then:
+    #     - logger.log: "Double click"
+    #     - cover.close: my_cover
         
 #End-stop cover binary sensors
   - platform: template
@@ -406,6 +430,9 @@ cover:
     close_duration: ${close_duration}
     close_endstop: close_endstop_binary_sensor
     stop_action:
+      - globals.set:
+          id: powered
+          value: '0'
       - if:
           condition:
             lambda: 'return id(open_cover).state;'
@@ -416,3 +443,4 @@ cover:
             lambda: 'return id(close_cover).state;'
           then:
             - switch.turn_off: close_cover
+
